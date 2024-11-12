@@ -1,6 +1,6 @@
 use hyper::{
     header::{CONTENT_LENGTH, CONTENT_TYPE},
-    Body,
+    body::Body,
     Response,
     StatusCode,
 };
@@ -80,7 +80,7 @@ pub struct ReadResponseObject {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<i32>,
 }
-
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct WriteObject {
     pub iid: u64,

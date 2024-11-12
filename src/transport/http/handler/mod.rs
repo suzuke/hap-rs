@@ -1,5 +1,5 @@
 use futures::future::{BoxFuture, FutureExt};
-use hyper::{self, Body, Response, StatusCode, Uri};
+use hyper::{body::Body, Response, StatusCode, Uri};
 
 use crate::{
     pointer,
