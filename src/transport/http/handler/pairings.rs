@@ -3,6 +3,7 @@ use hyper::{body::Buf, Body};
 use log::{debug, info};
 use std::{ops::Deref, str};
 use uuid::Uuid;
+use ed25519_dalek::PUBLIC_KEY_LENGTH;
 
 use crate::{
     event::Event,
@@ -157,9 +158,11 @@ async fn handle_add(
     let mut s = storage.lock().await;
     match s.load_pairing(&pairing_uuid).await {
         Ok(mut pairing) => {
-            if ed25519_dalek::PublicKey::from_bytes(&pairing.public_key)?
-                != ed25519_dalek::PublicKey::from_bytes(&ltpk)?
-            {
+            let pairing_key = ed25519_dalek::VerifyingKey::from_bytes(&pairing.public_key)?;
+            let mut key_bytes = [0u8; PUBLIC_KEY_LENGTH];
+            key_bytes.copy_from_slice(&ltpk[..PUBLIC_KEY_LENGTH]);
+            let ltpk_key = ed25519_dalek::VerifyingKey::from_bytes(&key_bytes)?;
+            if pairing_key != ltpk_key {
                 return Err(tlv::Error::Unknown);
             }
             pairing.permissions = permissions;

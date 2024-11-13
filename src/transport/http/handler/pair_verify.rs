@@ -1,13 +1,12 @@
 use aead::{generic_array::GenericArray, AeadInPlace, NewAead};
 use chacha20poly1305::ChaCha20Poly1305;
+use ed25519_dalek::ed25519::signature::SignerMut;
 use futures::{
     channel::oneshot,
     future::{BoxFuture, FutureExt},
 };
 use hyper::{body::Buf, Body};
 use log::{debug, info};
-use rand::rngs::OsRng;
-use signature::{Signer, Verifier};
 use std::str;
 use uuid::Uuid;
 use x25519_dalek::{EphemeralSecret, PublicKey};
@@ -131,19 +130,23 @@ async fn handle_start(
     a_pub.copy_from_slice(bytes);
     let a_pub = PublicKey::from(a_pub);
 
-    let mut csprng = OsRng {};
-    let b = EphemeralSecret::new(&mut csprng);
+    // let mut csprng = OsRng {};
+    // let b = EphemeralSecret::random_from_rng(&mut csprng);
+    let b = EphemeralSecret::random();
     let b_pub = PublicKey::from(&b);
     let shared_secret = b.diffie_hellman(&a_pub);
 
-    let config = config.lock().await;
+    let mut config = config.lock().await;
     let device_id = config.device_id.to_string();
 
     let mut accessory_info: Vec<u8> = Vec::new();
     accessory_info.extend(b_pub.as_bytes());
     accessory_info.extend(device_id.as_bytes());
     accessory_info.extend(a_pub.as_bytes());
-    let accessory_signature = config.device_ed25519_keypair.sign(&accessory_info);
+    let accessory_signature = match config.device_ed25519_keypair.try_sign(&accessory_info) {
+        Ok(signature) => signature,
+        Err(_err) => return Err(tlv::Error::Unknown),
+    };
 
     drop(config);
 
@@ -216,9 +219,10 @@ async fn handle_finish(
             debug!("received sub-TLV: {:?}", &sub_tlv);
             let device_pairing_id = sub_tlv.get(&(Type::Identifier as u8)).ok_or(tlv::Error::Unknown)?;
             debug!("raw device pairing ID: {:?}", &device_pairing_id);
-            let device_signature = ed25519_dalek::Signature::from_bytes(
-                sub_tlv.get(&(Type::Signature as u8)).ok_or(tlv::Error::Unknown)?,
-            )?;
+            let device_signature_bytes = sub_tlv.get(&(Type::Signature as u8)).ok_or(tlv::Error::Unknown)?;
+            let mut device_signature_bytes_array = [0u8; ed25519_dalek::SIGNATURE_LENGTH];
+            device_signature_bytes_array.copy_from_slice(device_signature_bytes);
+            let device_signature = ed25519_dalek::Signature::from_bytes(&device_signature_bytes_array);
             debug!("device signature: {:?}", &device_signature);
 
             let uuid_str = str::from_utf8(device_pairing_id)?;
@@ -232,8 +236,8 @@ async fn handle_finish(
             device_info.extend(device_pairing_id);
             device_info.extend(session.b_pub.as_bytes());
 
-            if ed25519_dalek::PublicKey::from_bytes(&pairing.public_key)?
-                .verify(&device_info, &device_signature)
+            if ed25519_dalek::VerifyingKey::from_bytes(&pairing.public_key)?
+                .verify_strict(&device_info, &device_signature)
                 .is_err()
             {
                 return Err(tlv::Error::Authentication);

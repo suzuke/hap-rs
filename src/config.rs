@@ -1,4 +1,4 @@
-use ed25519_dalek::Keypair as Ed25519Keypair;
+use ed25519_dalek::SigningKey as Ed25519Keypair;
 //use eui48::MacAddress;
 use macaddr::MacAddr6 as MacAddress;
 use rand::{rngs::OsRng, Rng};
