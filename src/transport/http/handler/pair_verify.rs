@@ -1,4 +1,4 @@
-use aead::{generic_array::GenericArray, AeadInPlace, NewAead};
+use aead::{generic_array::GenericArray, AeadInPlace, KeyInit};
 use chacha20poly1305::ChaCha20Poly1305;
 use ed25519_dalek::ed25519::signature::SignerMut;
 use futures::{
