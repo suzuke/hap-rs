@@ -26,14 +26,13 @@ async-trait = "0.1"
 byteorder = "1.3"
 bytes = "1.0"
 chacha20poly1305 = "0.8"
-ed25519-dalek = { version = "1.0", features = ["std", "serde"] }
-erased-serde = "0.3"
+erased-serde = "0.4.5"
 macaddr = { version = "1.0.1", features = ["serde"] }
 futures = "0.3"
 if-addrs = "0.13.3"
 hkdf = "0.11"
 hyper = { version = "0.14.31", features = ["server", "http1"] }
-libmdns = "0.6"
+libmdns = "0.9.1"
 log = "0.4"
 num = "0.2"
 rand = "0.7"
@@ -47,6 +46,7 @@ tokio = "1.8"
 url = "2.1"
 uuid = { version = "1.11.0", features = ["v4", "serde"] }
 x25519-dalek = "1.1"
+ed25519-dalek = { version = "1.0", features = ["std", "serde"] }
 
 [build-dependencies]
 handlebars = "6.2.0"
