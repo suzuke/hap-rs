@@ -4,15 +4,10 @@ use futures::future::{BoxFuture, FutureExt};
 use hyper::{body::Buf, Body};
 use log::{debug, info};
 use num::BigUint;
-use rand::{rngs::OsRng, RngCore};
+use rand_core::{OsRng, RngCore};
 use sha2::{digest::Digest, Sha512};
 use signature::{Signer, Verifier};
-use srp::{
-    client::{srp_private_key, SrpClient},
-    groups::G_3072,
-    server::{SrpServer, UserRecord},
-    types::SrpGroup,
-};
+use srp::{groups::G_3072, server::SrpServer, types::SrpGroup};
 use std::{ops::BitXor, str};
 use uuid::Uuid;
 
@@ -26,7 +21,6 @@ use crate::{
 
 struct Session {
     salt: [u8; 16],
-    verifier: Vec<u8>,
     b: [u8; 64],
     b_pub: Vec<u8>,
     shared_secret: Option<Vec<u8>>,
@@ -159,44 +153,28 @@ impl TlvHandlerExt for PairSetup {
 async fn handle_start(handler: &mut PairSetup, config: pointer::Config) -> Result<tlv::Container, tlv::Error> {
     info!("pair setup M1: received SRP start request");
 
-    // TODO
-    // If the accessory is already paired, it must respond with the following TLV items:
-    // kTLVType_State <M2>
-    // kTLVType_Error <kTLVError_Unavailable>
-
     if handler.unsuccessful_tries > 100 {
         return Err(tlv::Error::MaxTries);
     }
 
-    // TODO
-    // If the accessory is currently performing a PairSetup procedure with a different controller, it must respond with
-    // the following TLV items:
-    // kTLVType_State <M2>
-    // kTLVType_Error <kTLVError_Busy>
-
     let mut csprng = OsRng {};
-    let mut salt = [0; 16]; // s
-    let mut b = [0; 64];
+    let mut salt = [0u8; 16];
+    let mut b = [0u8; 64];
     csprng.fill_bytes(&mut salt);
     csprng.fill_bytes(&mut b);
 
-    // TODO - respect pairing flags (specification p. 35 - 7.) for split pair setup
+    let pin = config.lock().await.pin.to_string();
+    let username = b"Pair-Setup";
+    let password = pin.as_bytes();
 
-    let private_key = srp_private_key::<Sha512>(b"Pair-Setup", &config.lock().await.pin.to_string().as_bytes(), &salt); // x = H(s | H(I | ":" | P))
-    let srp_client = SrpClient::<Sha512>::new(&private_key, &G_3072);
-    let verifier = srp_client.get_password_verifier(&private_key); // v = g^x
+    let srp_client = srp::client::SrpClient::<Sha512>::new(&G_3072);
+    let verifier = srp_client.compute_verifier(username, password, &salt);
 
-    let user = UserRecord {
-        username: b"Pair-Setup",
-        salt: &salt,
-        verifier: &verifier,
-    };
-    let srp_server = SrpServer::<Sha512>::new(&user, b"foo", &b, &G_3072)?;
-    let b_pub = srp_server.get_b_pub();
+    let srp_server = SrpServer::<Sha512>::new(&G_3072);
+    let b_pub = srp_server.compute_public_ephemeral(&b, &verifier);
 
     handler.session = Some(Session {
         salt,
-        verifier,
         b,
         b_pub: b_pub.clone(),
         shared_secret: None,
@@ -217,24 +195,24 @@ async fn handle_verify(handler: &mut PairSetup, a_pub: &[u8], a_proof: &[u8]) ->
     match handler.session {
         None => Err(tlv::Error::Unknown),
         Some(ref mut session) => {
-            let user = UserRecord {
-                username: b"Pair-Setup",
-                salt: &session.salt,
-                verifier: &session.verifier,
-            };
-            let srp_server = SrpServer::<Sha512>::new(&user, a_pub, &session.b, &G_3072)?;
-            let shared_secret = srp_server.get_key();
+            let srp_server = SrpServer::<Sha512>::new(&G_3072);
+            
+            let verifier = srp_server.process_reply(&session.b, &session.b_pub, a_pub)?;
+            
+            if verifier.verify_client(a_proof).is_err() {
+                return Err(tlv::Error::Authentication);
+            }
+
+            let shared_secret = verifier.key();
+            let b_proof = verifier.proof();
 
             session.shared_secret = Some(shared_secret.to_vec());
-
-            let b_proof =
-                verify_client_proof::<Sha512>(&session.b_pub, a_pub, a_proof, &session.salt, &shared_secret, &G_3072)?;
 
             info!("pair setup M4: sending SRP verify response");
 
             Ok(vec![
                 Value::State(StepNumber::SrpVerifyResponse as u8),
-                Value::Proof(b_proof),
+                Value::Proof(b_proof.to_vec()),
             ])
         },
     }
@@ -276,12 +254,12 @@ async fn handle_exchange(
 
                 let sub_tlv = tlv::decode(&decrypted_data);
                 let device_pairing_id = sub_tlv.get(&(Type::Identifier as u8)).ok_or(tlv::Error::Unknown)?;
-                let device_ltpk = ed25519_dalek::PublicKey::from_bytes(
-                    sub_tlv.get(&(Type::PublicKey as u8)).ok_or(tlv::Error::Unknown)?,
+                let device_ltpk = ed25519_dalek::VerifyingKey::from_bytes(
+                    sub_tlv.get(&(Type::PublicKey as u8)).ok_or(tlv::Error::Unknown)?.as_slice().try_into().unwrap(),
                 )?;
-                let device_signature = ed25519_dalek::Signature::from_bytes(
-                    sub_tlv.get(&(Type::Signature as u8)).ok_or(tlv::Error::Unknown)?,
-                )?;
+                let device_signature = ed25519_dalek::Signature::try_from(
+                    sub_tlv.get(&(Type::Signature as u8)).ok_or(tlv::Error::Unknown)?.as_slice(),
+                );
 
                 let device_x = hkdf_extract_and_expand(
                     b"Pair-Setup-Controller-Sign-Salt",
@@ -294,7 +272,7 @@ async fn handle_exchange(
                 device_info.extend(device_pairing_id);
                 device_info.extend(device_ltpk.as_bytes());
 
-                if device_ltpk.verify(&device_info, &device_signature).is_err() {
+                if device_ltpk.verify(&device_info, device_signature.as_ref().map_err(|_| tlv::Error::Authentication)?).is_err() {
                     return Err(tlv::Error::Authentication);
                 }
 
@@ -319,19 +297,18 @@ async fn handle_exchange(
                     shared_secret,
                     b"Pair-Setup-Accessory-Sign-Info",
                 )?;
-
                 let config = config.lock().await;
                 let device_id = config.device_id.to_string();
 
                 let mut accessory_info: Vec<u8> = Vec::new();
                 accessory_info.extend(&accessory_x);
                 accessory_info.extend(device_id.as_bytes());
-                accessory_info.extend(config.device_ed25519_keypair.public.as_bytes());
+                accessory_info.extend(config.device_ed25519_keypair.verifying_key().as_bytes());
                 let accessory_signature = config.device_ed25519_keypair.sign(&accessory_info);
 
                 let encoded_sub_tlv = vec![
                     Value::Identifier(device_id),
-                    Value::PublicKey(config.device_ed25519_keypair.public.as_bytes().to_vec()),
+                    Value::PublicKey(config.device_ed25519_keypair.verifying_key().as_bytes().to_vec()),
                     Value::Signature(accessory_signature.to_bytes().to_vec()),
                 ]
                 .encode();

@@ -6,7 +6,7 @@ use futures::{
 };
 use hyper::{body::Buf, Body};
 use log::{debug, info};
-use rand::rngs::OsRng;
+use rand_core::OsRng;
 use signature::{Signer, Verifier};
 use std::str;
 use uuid::Uuid;
@@ -132,7 +132,7 @@ async fn handle_start(
     let a_pub = PublicKey::from(a_pub);
 
     let mut csprng = OsRng {};
-    let b = EphemeralSecret::new(&mut csprng);
+    let b = EphemeralSecret::random_from_rng(&mut csprng);
     let b_pub = PublicKey::from(&b);
     let shared_secret = b.diffie_hellman(&a_pub);
 
@@ -217,8 +217,8 @@ async fn handle_finish(
             let device_pairing_id = sub_tlv.get(&(Type::Identifier as u8)).ok_or(tlv::Error::Unknown)?;
             debug!("raw device pairing ID: {:?}", &device_pairing_id);
             let device_signature = ed25519_dalek::Signature::from_bytes(
-                sub_tlv.get(&(Type::Signature as u8)).ok_or(tlv::Error::Unknown)?,
-            )?;
+                sub_tlv.get(&(Type::Signature as u8)).ok_or(tlv::Error::Unknown)?.as_slice().try_into().map_err(|_| tlv::Error::Unknown)?,
+            );
             debug!("device signature: {:?}", &device_signature);
 
             let uuid_str = str::from_utf8(device_pairing_id)?;
@@ -232,7 +232,7 @@ async fn handle_finish(
             device_info.extend(device_pairing_id);
             device_info.extend(session.b_pub.as_bytes());
 
-            if ed25519_dalek::PublicKey::from_bytes(&pairing.public_key)?
+            if ed25519_dalek::VerifyingKey::from_bytes(&pairing.public_key)?
                 .verify(&device_info, &device_signature)
                 .is_err()
             {
