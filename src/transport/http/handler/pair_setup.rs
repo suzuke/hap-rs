@@ -8,9 +8,9 @@ use num::BigUint;
 use rand::{rngs::OsRng, RngCore};
 use sha2::{digest::Digest, Sha512};
 use srp::{
-    client::{srp_private_key, SrpClient},
+    client::SrpClient,
     groups::G_3072,
-    server::{SrpServer, UserRecord},
+    server::SrpServer,
     types::SrpGroup,
 };
 use std::{ops::BitXor, str};
@@ -180,19 +180,16 @@ async fn handle_start(handler: &mut PairSetup, config: pointer::Config) -> Resul
     csprng.fill_bytes(&mut salt);
     csprng.fill_bytes(&mut b);
 
-    // TODO - respect pairing flags (specification p. 35 - 7.) for split pair setup
 
-    let private_key = srp_private_key::<Sha512>(b"Pair-Setup", &config.lock().await.pin.to_string().as_bytes(), &salt); // x = H(s | H(I | ":" | P))
-    let srp_client = SrpClient::<Sha512>::new(&private_key.as_slice(), &G_3072);
-    let verifier = srp_client.get_password_verifier(&private_key.as_slice()); // v = g^x
+    let srp_client = SrpClient::<Sha512>::new(&G_3072);
+    let verifier = srp_client.compute_verifier(b"Pair-Setup", &config.lock().await.pin.to_string().as_bytes(), &salt);
 
-    let user = UserRecord {
-        username: b"Pair-Setup",
-        salt: &salt,
-        verifier: &verifier,
-    };
-    let srp_server = SrpServer::<Sha512>::new(&user, b"foo", &b, &G_3072)?;
-    let b_pub = srp_server.get_b_pub();
+    info!("pair setup M2: verifier: {:?}", verifier);
+
+    let srp_server = SrpServer::<Sha512>::new(&G_3072);
+    let b_pub = srp_server.compute_public_ephemeral(&b, verifier.as_slice());
+
+    info!("pair setup M2: b_pub: {:?}", b_pub);
 
     handler.session = Some(Session {
         salt,
@@ -217,20 +214,20 @@ async fn handle_verify(handler: &mut PairSetup, a_pub: &[u8], a_proof: &[u8]) ->
     match handler.session {
         None => Err(tlv::Error::Unknown),
         Some(ref mut session) => {
-            let user = UserRecord {
-                username: b"Pair-Setup",
-                salt: &session.salt,
-                verifier: &session.verifier,
-            };
-            let srp_server = SrpServer::<Sha512>::new(&user, a_pub, &session.b, &G_3072)?;
-            let shared_secret = srp_server.get_key();
+            let srp_server = SrpServer::<Sha512>::new(&G_3072);
+            let verifier = srp_server.process_reply(&session.b, &session.verifier, a_pub)?;
+
+            let shared_secret = verifier.key();
+            info!("pair setup M3: shared_secret: {:?}", shared_secret);
 
             session.shared_secret = Some(shared_secret.to_vec());
 
             let b_proof =
-                verify_client_proof::<Sha512>(&session.b_pub, a_pub, a_proof, &session.salt, &shared_secret.as_slice(), &G_3072)?;
+                verify_client_proof::<Sha512>(&session.b_pub, a_pub, a_proof, &session.salt, &shared_secret, &G_3072)?;
 
             info!("pair setup M4: sending SRP verify response");
+
+            info!("pair setup M4: b_proof: {:?}", b_proof);
 
             Ok(vec![
                 Value::State(StepNumber::SrpVerifyResponse as u8),
